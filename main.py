@@ -1,113 +1,155 @@
 import torch
 import clip
-import torchvision.transforms as T
+import trimesh
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
 
-from pytorch3d.utils import ico_sphere
-from pytorch3d.structures import Meshes
-from pytorch3d.renderer import (
-    FoVPerspectiveCameras,
-    MeshRenderer,
-    MeshRasterizer,
-    SoftPhongShader,
-    RasterizationSettings,
-    PointLights,
-    TexturesVertex,
-)
-
-# --------------------------------------------------
-# 0. Device (CPU for macOS)
-# --------------------------------------------------
+# -------------------------------
+# 0. Device
+# -------------------------------
 device = torch.device("cpu")
 
-# --------------------------------------------------
-# 1. Load CLIP (frozen)
-# --------------------------------------------------
-clip_model, _ = clip.load("ViT-B/32", device=device)
+
+# -------------------------------
+# 1. Load CLIP
+# -------------------------------
+clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 clip_model.eval()
 
-text_prompt = "a giraffe"
+text_prompt = "tall cone"
+#turn text prompt into tokens that CLIP can understand
 text_tokens = clip.tokenize([text_prompt]).to(device)
-
+#encode text prompt into feature vector
 with torch.no_grad():
     text_feat = clip_model.encode_text(text_tokens)
     text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
+    
 
-# --------------------------------------------------
-# 2. Create a simple mesh (sphere)
-# --------------------------------------------------
-mesh = ico_sphere(level=3, device=device)
+# -------------------------------
+# 2. Create mesh (simple sphere)
+# -------------------------------
+mesh = trimesh.creation.icosphere(subdivisions=4, radius=1.0)
+verts = torch.tensor(mesh.vertices, dtype=torch.float32, device=device, requires_grad=True)
+faces = np.array(mesh.faces)
 
-verts = mesh.verts_packed().clone().detach()
-faces = mesh.faces_packed()
 
-# These are the parameters we optimize
-verts.requires_grad_(True)
+# -------------------------------
+# 3. Compute Laplacian adjacency for smoothing
+# -------------------------------
+def compute_laplacian(vertices, faces):
+    n = vertices.shape[0]
+    L = torch.zeros((n, n), device=vertices.device)
+    for f in faces:
+        for i, j in [(0,1),(1,2),(2,0)]:
+            L[f[i], f[j]] = 1
+            L[f[j], f[i]] = 1
+    # Degree matrix
+    D = torch.diag(L.sum(dim=1))
+    L = D - L
+    return L
 
-textures = TexturesVertex(
-    verts_features=torch.ones_like(verts)[None]
-)
+L = compute_laplacian(verts, faces)
 
-# --------------------------------------------------
-# 3. Renderer setup
-# --------------------------------------------------
-cameras = FoVPerspectiveCameras(device=device)
-lights = PointLights(device=device, location=[[0.0, 0.0, 3.0]])
 
-raster_settings = RasterizationSettings(
-    image_size=224,
-    blur_radius=0.0,
-    faces_per_pixel=1,
-)
-
-renderer = MeshRenderer(
-    rasterizer=MeshRasterizer(
-        cameras=cameras,
-        raster_settings=raster_settings
-    ),
-    shader=SoftPhongShader(
-        device=device,
-        cameras=cameras,
-        lights=lights
+# -------------------------------
+# 4. CPU renderer
+# -------------------------------
+def render_mesh(verts_np, faces_np, elev=30, azim=45, image_size=224):
+    #Simple CPU renderer using matplotlib
+    fig = plt.figure(figsize=(3, 3), dpi=image_size // 3)
+    ax = fig.add_subplot(111, projection='3d')
+    ax.plot_trisurf(
+        verts_np[:, 0],
+        verts_np[:, 1],
+        verts_np[:, 2],
+        triangles=faces_np,
+        color=(0.5, 0.5, 0.5),
+        shade=True
     )
-)
+    ax.view_init(elev=elev, azim=azim)
+    ax.set_axis_off()
+    fig.canvas.draw()
+    buf = fig.canvas.buffer_rgba()
+    img = np.asarray(buf)[:, :, :3]
+    plt.close(fig)
+    #Resize to 224x224 for CLIP
+    img_pil = Image.fromarray(img).resize((224, 224))
+    return np.array(img_pil)
 
-# --------------------------------------------------
-# 4. Optimizer
-# --------------------------------------------------
-optimizer = torch.optim.Adam([verts], lr=1e-3)
 
-# CLIP image normalization
-clip_normalize = T.Normalize(
-    mean=(0.48145466, 0.4578275, 0.40821073),
-    std=(0.26862954, 0.26130258, 0.27577711),
-)
+# -------------------------------
+# 5. Optimiser with Laplacian smoothing
+# -------------------------------
+#lr = learning rate for vertex updates - controls how much the mesh changes each step 
+optimiser = torch.optim.Adam([verts], lr=3e-3) 
+#number of optimisation steps - more steps allows for better convergence but takes longer
+num_steps = 300
+#weight for Laplacian smoothing
+lambda_smooth = 0.1
 
-# --------------------------------------------------
-# 5. Optimization loop
-# --------------------------------------------------
-num_steps = 200
+#multiple camera views (elev, azim) for multi-view CLIP loss
+camera_views = [
+    (30, 45),
+    (30, 135),
+    (30, 225),
+    (30, 315)
+]
 
+#optimisation loop, 
+# - rendering from multiple views and applying CLIP loss + Laplacian smoothing
 for step in range(num_steps):
-    mesh = Meshes(
-        verts=[verts],
-        faces=[faces],
-        textures=textures
-    )
+    verts_np = verts.detach().cpu().numpy()
+    total_loss = 0.0
 
-    image = renderer(mesh)[..., :3]  # (1, H, W, 3)
-    image = image.permute(0, 3, 1, 2)  # -> (1, 3, H, W)
-    image = clip_normalize(image)
+    #multi-view CLIP loss
+    # - rendering from different camera angles and comparing to text prompt
+    for elev, azim in camera_views:
+        image_np = render_mesh(verts_np, faces, elev=elev, azim=azim)
+        image = Image.fromarray(image_np)
+        image_tensor = clip_preprocess(image).unsqueeze(0).to(device)
+        img_feat = clip_model.encode_image(image_tensor)
+        img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
+        loss = 1 - torch.cosine_similarity(img_feat, text_feat)
+        total_loss += loss
 
-    img_feat = clip_model.encode_image(image)
-    img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
+    avg_loss = total_loss / len(camera_views)
 
-    loss = 1 - torch.cosine_similarity(img_feat, text_feat)
+    #laplacian smoothing loss 
+    # - encourages neighboring vertices to stay close, preventing mesh distortion
+    smooth_loss = lambda_smooth * torch.trace(verts.t() @ L @ verts)
+    loss_total = avg_loss + smooth_loss
 
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
+    optimiser.zero_grad()
+    loss_total.backward()
+    optimiser.step()
+    
+    with torch.no_grad():
+        verts[:] = torch.clamp(verts, -2.0, 2.0)  #clamp vertices to prevent extreme deformations
 
-    if step % 20 == 0:
-        print(f"Step {step:03d} | Loss: {loss.item():.4f}")
+    #print progress every 10 steps, showing CLIP loss and smoothness loss
+    if step % 10 == 0:
+        print(f"Step {step:03d} | CLIP loss: {avg_loss.item():.4f} | Smooth loss: {smooth_loss.item():.4f}")
 
-print("Optimization finished.")
+print("Optimisation done")
+
+
+# -------------------------------
+# 6. Visualize final mesh
+# -------------------------------
+#convert final optimised vertices to numpy for visualization
+final_verts = verts.detach().cpu().numpy()
+
+#simple visualization of the final optimized mesh using matplotlib
+fig = plt.figure(figsize=(6, 6))
+ax = fig.add_subplot(111, projection='3d')
+ax.plot_trisurf(
+    final_verts[:, 0],
+    final_verts[:, 1],
+    final_verts[:, 2],
+    triangles=faces,
+    color=(0.5, 0.5, 0.5),
+    shade=True
+)
+ax.set_axis_off()
+plt.show()
