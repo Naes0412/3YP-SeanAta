@@ -5,7 +5,7 @@ import numpy as np
 from PIL import Image
 
 # -------------------------------
-# Device (use GPU if available)
+# Device (GPU)
 # -------------------------------
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)

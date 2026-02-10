@@ -8,16 +8,18 @@ from PIL import Image
 # -------------------------------
 # Device
 # -------------------------------
+
 device = torch.device("cpu")
 
 
 # -------------------------------
 # Load CLIP
 # -------------------------------
+
 clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 clip_model.eval()
 
-text_prompt = "a tall, narrow box"
+text_prompt = "a simple, boxy vase with a narrow neck and wide base"
 #turn text prompt into tokens that CLIP can understand
 text_tokens = clip.tokenize([text_prompt]).to(device)
 #encode text prompt into feature vector
@@ -29,6 +31,7 @@ with torch.no_grad():
 # -------------------------------
 # Create mesh (simple cube)
 # -------------------------------
+
 mesh = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
 #subdivide to increase vertex count for smoother optimisation
 mesh = mesh.subdivide()
@@ -40,14 +43,15 @@ faces = np.array(mesh.faces)
 # -------------------------------
 # Compute Laplacian adjacency for smoothing
 # -------------------------------
+
 def compute_laplacian(vertices, faces):
     n = vertices.shape[0]
     L = torch.zeros((n, n), device=vertices.device)
+    #build adjacency matrix from faces
     for f in faces:
         for i, j in [(0,1),(1,2),(2,0)]:
             L[f[i], f[j]] = 1
             L[f[j], f[i]] = 1
-    # Degree matrix
     D = torch.diag(L.sum(dim=1))
     L = D - L
     return L
@@ -84,6 +88,7 @@ def render_mesh(verts_np, faces_np, elev=30, azim=45, image_size=224):
 # -------------------------------
 # Optimiser with Laplacian smoothing
 # -------------------------------
+
 #lr = learning rate for vertex updates - controls how much the mesh changes each step 
 optimiser = torch.optim.Adam([verts], lr=1e-3) 
 #number of optimisation steps - more steps allows for better convergence but takes longer
@@ -102,7 +107,7 @@ camera_views = [
     (75, 45)
 ]
 
-#optimisation loop, 
+#optimisation loop
 # - rendering from multiple views and applying CLIP loss + Laplacian smoothing
 for step in range(num_steps):
     verts_np = verts.detach().cpu().numpy()
@@ -121,38 +126,44 @@ for step in range(num_steps):
 
     avg_loss = total_loss / len(camera_views) + eps
 
+    #----- additional regularisation losses -----
+
     #laplacian smoothing loss 
     # - encourages neighboring vertices to stay close, preventing mesh distortion
     smooth_loss = lambda_smooth * torch.trace(verts.t() @ L @ verts)
     #decay smoothing weight over time to allow more deformation in later steps
     smooth_weight = min(step / 50, 1.0)
     
-    #anisotropy loss to encourage one dominant axis
-    #bounding box extents
+    #anisotropy loss
+    # - encourages the mesh to have one dominant axis of elongation
     min_xyz = verts.min(dim=0).values
     max_xyz = verts.max(dim=0).values
     extents = max_xyz - min_xyz
-    #encourage one dominant axis
     anisotropy_loss = -torch.max(extents)
     
-    #volume loss to encourage the mesh to maintain a reasonable size
+    #volume loss
+    # - encourages the mesh to maintain a reasonable size, preventing collapse or explosion
     volume = torch.prod(extents)
     volume_loss = (volume - 1.0).abs()
     
-    #encourage vertical alignment
+    #height alignment loss
+    # - encourages vertical elongation
     height_alignment_loss = -extents[1]
     
-    #discourage centroid shift in X/Z, encourage it to stay centered and upright
+    #upright loss
+    # - encourages the mesh to be centered around the Y axis, preventing tipping over
     centroid = verts.mean(dim=0)
     upright_loss = centroid[0]**2 + centroid[2]**2
     
-    # radial symmetry around Y axis, discourages lopsidedness
+    #symmetry loss
+    # - encourages radial symmetry around the Y axis
     x, z = verts[:, 0], verts[:, 2]
     radius = torch.sqrt(x**2 + z**2 + eps)
     symmetry_loss = torch.var(radius)
 
     loss_total = avg_loss + (smooth_loss * smooth_weight) + 0.2 * anisotropy_loss + 0.05 * volume_loss + 0.3 * height_alignment_loss + 0.1 * upright_loss + 0.2 * symmetry_loss
     
+    #backpropagation and vertex update
     optimiser.zero_grad()
     loss_total.backward()
     optimiser.step()
@@ -178,6 +189,7 @@ print("Optimisation done")
 # -------------------------------
 # Visualize final mesh
 # -------------------------------
+
 #convert final optimised vertices to numpy for visualization
 final_verts = verts.detach().cpu().numpy()
 
