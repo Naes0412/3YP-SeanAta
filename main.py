@@ -6,18 +6,18 @@ import matplotlib.pyplot as plt
 from PIL import Image
 
 # -------------------------------
-# 0. Device
+# Device
 # -------------------------------
 device = torch.device("cpu")
 
 
 # -------------------------------
-# 1. Load CLIP
+# Load CLIP
 # -------------------------------
 clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 clip_model.eval()
 
-text_prompt = "a tall, narrow object"
+text_prompt = "a tall, narrow box"
 #turn text prompt into tokens that CLIP can understand
 text_tokens = clip.tokenize([text_prompt]).to(device)
 #encode text prompt into feature vector
@@ -27,10 +27,10 @@ with torch.no_grad():
     
 
 # -------------------------------
-# 2. Create mesh (simple cube)
+# Create mesh (simple cube)
 # -------------------------------
 mesh = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
-#subdivide to increase vertex count for smoother optimization
+#subdivide to increase vertex count for smoother optimisation
 mesh = mesh.subdivide()
 mesh = mesh.subdivide()
 verts = torch.tensor(mesh.vertices, dtype=torch.float32, device=device, requires_grad=True)
@@ -38,7 +38,7 @@ faces = np.array(mesh.faces)
 
 
 # -------------------------------
-# 3. Compute Laplacian adjacency for smoothing
+# Compute Laplacian adjacency for smoothing
 # -------------------------------
 def compute_laplacian(vertices, faces):
     n = vertices.shape[0]
@@ -56,7 +56,7 @@ L = compute_laplacian(verts, faces)
 
 
 # -------------------------------
-# 4. CPU renderer
+# Renderer (CPU)
 # -------------------------------
 def render_mesh(verts_np, faces_np, elev=30, azim=45, image_size=224):
     #Simple CPU renderer using matplotlib
@@ -82,15 +82,16 @@ def render_mesh(verts_np, faces_np, elev=30, azim=45, image_size=224):
 
 
 # -------------------------------
-# 5. Optimiser with Laplacian smoothing
+# Optimiser with Laplacian smoothing
 # -------------------------------
 #lr = learning rate for vertex updates - controls how much the mesh changes each step 
 optimiser = torch.optim.Adam([verts], lr=3e-3) 
 #number of optimisation steps - more steps allows for better convergence but takes longer
 num_steps = 250
 #weight for Laplacian smoothing
-# lambda_smooth = 0.1
 lambda_smooth = max(0.1, 10.0 / num_steps)  #decay smoothing weight over time to allow more deformation later
+#epsilon to prevent division by zero in loss calculations
+eps = 1e-8
 
 #multiple camera views (elev, azim) for multi-view CLIP loss
 camera_views = [
@@ -114,15 +115,17 @@ for step in range(num_steps):
         image = Image.fromarray(image_np)
         image_tensor = clip_preprocess(image).unsqueeze(0).to(device)
         img_feat = clip_model.encode_image(image_tensor)
-        img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
+        img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True) + eps
         loss = 1 - torch.cosine_similarity(img_feat, text_feat)
         total_loss += loss
 
-    avg_loss = total_loss / len(camera_views)
+    avg_loss = total_loss / len(camera_views) + eps
 
     #laplacian smoothing loss 
     # - encourages neighboring vertices to stay close, preventing mesh distortion
     smooth_loss = lambda_smooth * torch.trace(verts.t() @ L @ verts)
+    #decay smoothing weight over time to allow more deformation in later steps
+    smooth_weight = min(step / 50, 1.0)
     
     #anisotropy loss to encourage one dominant axis
     #bounding box extents
@@ -131,21 +134,38 @@ for step in range(num_steps):
     extents = max_xyz - min_xyz
     #encourage one dominant axis
     anisotropy_loss = -torch.max(extents)
-
-    loss_total = avg_loss + smooth_loss + 0.2 * anisotropy_loss
     
     #volume loss to encourage the mesh to maintain a reasonable size
     volume = torch.prod(extents)
     volume_loss = (volume - 1.0).abs()
+    
+    #encourage vertical alignment
+    height_alignment_loss = -extents[1]
+    
+    #discourage centroid shift in X/Z, encourage it to stay centered and upright
+    centroid = verts.mean(dim=0)
+    upright_loss = centroid[0]**2 + centroid[2]**2
+    
+    # radial symmetry around Y axis, discourages lopsidedness
+    x, z = verts[:, 0], verts[:, 2]
+    radius = torch.sqrt(x**2 + z**2 + eps)
+    symmetry_loss = torch.var(radius)
 
-    loss_total += 0.05 * volume_loss
-
+    loss_total = avg_loss + (smooth_loss * smooth_weight) + 0.2 * anisotropy_loss + 0.05 * volume_loss + 0.3 * height_alignment_loss + 0.1 * upright_loss + 0.2 * symmetry_loss
+    
     optimiser.zero_grad()
     loss_total.backward()
     optimiser.step()
     
+    verts_prev = verts.clone().detach()
+    
     with torch.no_grad():
-        verts[:] = torch.clamp(verts, -2.0, 2.0)  #clamp vertices to prevent extreme deformations
+        #clamp vertices to prevent extreme deformations
+        verts[:] = torch.clamp(verts, -2.0, 2.0)
+        #limit vertex movement per step to prevent instability
+        delta = verts - verts_prev
+        delta = torch.clamp(delta, -0.01, 0.01)
+        verts.copy_(verts_prev + delta)
 
     #print progress every 10 steps, showing CLIP loss and smoothness loss
     if step % 10 == 0:
@@ -156,12 +176,12 @@ print("Optimisation done")
 
 
 # -------------------------------
-# 6. Visualize final mesh
+# Visualize final mesh
 # -------------------------------
 #convert final optimised vertices to numpy for visualization
 final_verts = verts.detach().cpu().numpy()
 
-#simple visualization of the final optimized mesh using matplotlib
+#simple visualization of the final optimised mesh using matplotlib
 fig = plt.figure(figsize=(6, 6))
 ax = fig.add_subplot(111, projection='3d')
 ax.plot_trisurf(
