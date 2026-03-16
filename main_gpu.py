@@ -17,6 +17,18 @@ from pytorch3d.renderer import (
     look_at_view_transform
 )
 
+import os
+
+# Ensure output directory exists
+output_dir = "outputs"
+
+if os.path.exists(output_dir):
+    for f in os.listdir(output_dir):
+        os.remove(os.path.join(output_dir, f))
+else:
+    os.makedirs(output_dir)
+
+
 # ------------------------------- Device -------------------------------
 
 device = torch.device("cuda")
@@ -27,7 +39,7 @@ device = torch.device("cuda")
 clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 clip_model.eval()
 
-text_prompt = "a tall, narrow object"
+text_prompt = "a tall, narrow cylinder"
 
 text_tokens = clip.tokenize([text_prompt]).to(device)
 with torch.no_grad():
@@ -46,6 +58,7 @@ faces = torch.tensor(mesh.faces, dtype=torch.int64, device=device)
 # White vertex colour
 verts_rgb = torch.ones_like(verts)[None]
 textures = TexturesVertex(verts_features=verts_rgb)
+
 
 # ------------------------------- Differentiable Renderer -------------------------------
 
@@ -77,13 +90,17 @@ def get_renderer():
 
 renderer = get_renderer()
 
+
 # ------------------------------- Optimiser -------------------------------
 
-optimiser = torch.optim.Adam([verts], lr=1e-2)
+optimiser = torch.optim.Adam([verts], lr=1e-3)
 num_steps = 300
 eps = 1e-8
 
+
 # ------------------------------- Optimisation Loop -------------------------------
+
+verts_init = verts.detach().clone()
 
 for step in range(num_steps):
 
@@ -104,44 +121,33 @@ for step in range(num_steps):
 
     clip_loss = 1 - torch.cosine_similarity(img_feat, text_feat)
 
-    # simple regularisation
     centroid = verts.mean(dim=0)
-    reg_loss = 0.1 * (centroid ** 2).sum()
+    centroid_loss = 0.1 * (centroid ** 2).sum()
+    displacement_loss = 0.1 * ((verts - verts_init) ** 2).sum()
+    reg_loss = centroid_loss + displacement_loss
 
     loss = clip_loss + reg_loss
     loss.backward()
+    torch.nn.utils.clip_grad_norm_([verts], max_norm=1.0)
     optimiser.step()
-    
-    # if step % 100 == 0:
-    #     final_verts = verts.detach().cpu().numpy()
-    #     final_faces = faces.detach().cpu().numpy()
-
-    #     temp_mesh = trimesh.Trimesh(
-    #         vertices=final_verts,
-    #         faces=final_faces
-    #     )
-
-    #     temp_mesh.export(f"step_{step}.obj")
-    #     print(f"Saved step_{step}.obj")
     
     if step % 50 == 0:
         rendered = renderer(mesh)[0, ..., :3].detach().cpu().numpy()
         rendered = (rendered * 255).astype(np.uint8)
-        Image.fromarray(rendered).save(f"render_{step}.png")
+        Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{step}.png"))
 
     if step % 20 == 0:
         print(f"Step {step} | Loss: {loss.item():.4f}")
 
 print("Optimisation complete.")
 
-# -------------------------------
-# Save final mesh to file
-# -------------------------------
+
+# ------------------------------- Save final mesh to file -------------------------------
 
 final_verts = verts.detach().cpu().numpy()
 final_faces = faces.detach().cpu().numpy()
 
 final_mesh = trimesh.Trimesh(vertices=final_verts, faces=final_faces)
 
-final_mesh.export("final_result.obj")
+final_mesh.export(os.path.join(output_dir, "final_result.obj"))
 print("Saved final_result.obj")
