@@ -63,20 +63,22 @@ class DisplacementMLP(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(3, 64),
+            nn.Linear(3, 128),
             nn.ReLU(),
-            nn.Linear(64, 64),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, 3),
-            nn.Tanh()  # bounds displacements to [-1, 1]
+            nn.Tanh()
         )
 
     def forward(self, verts):
-        # max displacement of 0.1 units per vertex
-        return verts + 0.1 * self.net(verts)
+        # max displacement of 0.3 units per vertex
+        return verts + 0.3 * self.net(verts)
 
 mlp = DisplacementMLP().to(device)
-optimiser = torch.optim.Adam(mlp.parameters(), lr=1e-3)
+optimiser = torch.optim.Adam(mlp.parameters(), lr=5e-3)
 
 
 # ------------------------------- Differentiable Renderer -------------------------------
