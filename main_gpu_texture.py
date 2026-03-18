@@ -41,7 +41,7 @@ device = torch.device("cuda")
 clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 clip_model.eval()
 
-text_prompt = "Iron Man metallic red and gold suit"
+text_prompt = "a 3D render of Iron Man armor, red metallic chest plate, gold legs and arms, superhero suit"
 
 text_tokens = clip.tokenize([text_prompt]).to(device)
 with torch.no_grad():
@@ -62,26 +62,51 @@ verts = torch.tensor(mesh_input.vertices, dtype=torch.float32, device=device)
 faces = torch.tensor(mesh_input.faces, dtype=torch.int64, device=device)
 
 
+# ------------------------------- Fourier Encoding -------------------------------
+
+class FourierEncoding(nn.Module):
+    def __init__(self, num_freqs=6):
+        super().__init__()
+        # Frequencies: 2^0 * pi, 2^1 * pi, ..., 2^(num_freqs-1) * pi
+        # Registered as a buffer so it moves to the correct device with .to(device)
+        self.register_buffer(
+            'freqs',
+            2.0 ** torch.arange(num_freqs).float() * torch.pi
+        )
+
+    def forward(self, x):
+        # x: [N, 3]
+        x_freq = x.unsqueeze(-1) * self.freqs   # [N, 3, num_freqs]
+        x_freq = x_freq.reshape(x.shape[0], -1) # [N, 3 * num_freqs]
+        # concatenate raw coords + sin + cos encodings
+        return torch.cat([x, torch.sin(x_freq), torch.cos(x_freq)], dim=-1)
+        # output dim: 3 + 2 * 3 * num_freqs = 39 (for num_freqs=6)
+
+
 # ------------------------------- Colour MLP -------------------------------
 
 class ColourMLP(nn.Module):
-    def __init__(self):
+    def __init__(self, num_freqs=6):
         super().__init__()
+        self.enc = FourierEncoding(num_freqs)
+        in_dim = 3 + 2 * 3 * num_freqs
+        
         self.net = nn.Sequential(
-            nn.Linear(3, 128),
+            nn.Linear(in_dim, 256),
             nn.ReLU(),
-            nn.Linear(128, 128),
+            nn.Linear(256, 256),
             nn.ReLU(),
-            nn.Linear(128, 64),
+            nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(64, 3),
+            nn.Linear(128, 3),
             nn.Sigmoid()  # outputs RGB in [0, 1]
         )
 
     def forward(self, verts):
-        return self.net(verts)  # returns per-vertex RGB colours
+        encoded = self.enc(verts)
+        return self.net(encoded)  # returns per-vertex RGB colours
 
-mlp = ColourMLP().to(device)
+mlp = ColourMLP(num_freqs=6).to(device)
 optimiser = torch.optim.Adam(mlp.parameters(), lr=1e-3)
 scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=200, gamma=0.5)
 
@@ -89,8 +114,8 @@ scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=200, gamma=0.5)
 # ------------------------------- Renderer -------------------------------
 
 def get_renderer(elev=0, azim=0):
-    R, T = look_at_view_transform(1.2, elev, azim)
-    cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=60)
+    R, T = look_at_view_transform(2.0, elev, azim)
+    cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=30)
     raster_settings = RasterizationSettings(
         image_size=512,
         blur_radius=0.0,
@@ -131,6 +156,12 @@ for step in range(num_steps):
         images = r(mesh_obj)
         image = images[0, ..., :3].permute(2, 0, 1).unsqueeze(0)
         image = TF.resize(image, [224, 224])
+        
+        #normalise using CLIP's mean and std
+        image = TF.normalize(image, 
+            mean=[0.48145466, 0.4578275,  0.40821073],
+            std= [0.26862954, 0.26130258, 0.27577711])
+
         img_feat = clip_model.encode_image(image)
         img_feat = img_feat / (img_feat.norm(dim=-1, keepdim=True) + eps)
         clip_loss += 1 - torch.cosine_similarity(img_feat, text_feat)
