@@ -159,8 +159,8 @@ for step in range(num_steps):
     optimiser.zero_grad()
 
     #get per-vertex colours from MLP
-    verts_rgb = mlp(verts).unsqueeze(0)  # shape [1, num_verts, 3]
-    textures = TexturesVertex(verts_features=verts_rgb)
+    verts_rgb = mlp(verts)
+    textures = TexturesVertex(verts_features=verts_rgb.unsqueeze(0))
 
     mesh_obj = Meshes(
         verts=[verts],
@@ -187,9 +187,9 @@ for step in range(num_steps):
     clip_loss /= len(viewpoints)
 
     #smooth loss to suppress noisy colour variation
-    smooth_loss = colour_smoothness_loss(mlp(verts), faces)
+    smooth_loss = colour_smoothness_loss(verts_rgb, faces)
     
-    loss = clip_loss + 0.1 * smooth_loss
+    loss = clip_loss + 0.3 * smooth_loss
     loss.backward()
     torch.nn.utils.clip_grad_norm_(mlp.parameters(), max_norm=1.0)
     optimiser.step()
