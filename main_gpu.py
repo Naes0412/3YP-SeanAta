@@ -74,7 +74,7 @@ class DisplacementMLP(nn.Module):
         )
 
     def forward(self, verts):
-        # max displacement of 0.2 units per vertex
+        #max displacement of 0.2 units per vertex
         return verts + 0.2 * self.net(verts)
 
 mlp = DisplacementMLP().to(device)
@@ -85,6 +85,8 @@ scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=200, gamma=0.5)
 
 # ------------------------------- Differentiable Renderer -------------------------------
 
+#can render the mesh from any viewpoint
+# - elev controls the vertical angle of the camera, azim controls the horizontal angle
 def get_renderer(elev=20, azim=45):
     R, T = look_at_view_transform(2.5, elev, azim)
     cameras = FoVPerspectiveCameras(device=device, R=R, T=T)
