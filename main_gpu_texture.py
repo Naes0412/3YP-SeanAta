@@ -22,6 +22,9 @@ from pytorch3d.renderer import (
 
 import os
 
+from google.colab import drive
+drive.mount('/content/drive')
+
 # Ensure output directory exists
 output_dir = "outputs"
 if os.path.exists(output_dir):
