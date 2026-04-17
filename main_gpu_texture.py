@@ -29,16 +29,6 @@ import torchvision.transforms as T
 # from google.colab import drive
 # drive.mount('/content/drive')
 
-def get_augmented_crops(image, n_crops=8):
-    crops = []
-    for _ in range(n_crops):
-        scale = torch.FloatTensor(1).uniform_(0.5, 1.0).item()
-        size = int(224 * scale)
-        crop = T.RandomCrop(size)(image.squeeze(0))
-        crop = TF.resize(crop.unsqueeze(0), [224, 224])
-        crops.append(crop)
-    return torch.cat(crops, dim=0)  # [n_crops, 3, 224, 224]
-
 # Ensure output directory exists
 output_dir = "outputs"
 if os.path.exists(output_dir):
@@ -125,8 +115,8 @@ class ColourMLP(nn.Module):
         return self.net(encoded)  #returns per-vertex RGB colours
 
 mlp = ColourMLP(num_freqs=6).to(device)
-optimiser = torch.optim.Adam(mlp.parameters(), lr=1e-3)
-scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=300, gamma=0.5)
+optimiser = torch.optim.Adam(mlp.parameters(), lr=5e-3)
+scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=500, gamma=0.7)
 
 
 # ------------------------------- Renderer -------------------------------
@@ -143,7 +133,7 @@ def get_renderer(elev=0, azim=0):
     )
     
     #ambient light for flat lighting, no shadows
-    lights = AmbientLights(device=device)
+    lights = AmbientLights(device=device, ambient_color=((0.8, 0.8, 0.8),))
     
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(
@@ -163,11 +153,29 @@ num_steps = 1200
 eps = 1e-8
 viewpoints = [(20, 0), (20, 90), (20, 180), (20, 270), (60, 45), (-10, 45), (90, 0)]
 
+def get_augmented_crops(image, n_crops=8):
+    crops = []
+    _, h, w = image.shape
+    min_size = min(h, w) // 2  #min crop size is half the image size
+    for _ in range(n_crops):
+        scale = torch.FloatTensor(1).uniform_(0.5, 1.0).item()
+        size = int(min_size + scale * (min(h, w) - min_size)) #used min_size as floor
+        crop = T.RandomCrop(size)(image)
+        crop = TF.resize(crop.unsqueeze(0), [224, 224])
+        crops.append(crop)
+    return torch.cat(crops, dim=0)
+
+
 def colour_smoothness_loss(verts_rgb, faces):
         v0 = verts_rgb[faces[:, 0]]
         v1 = verts_rgb[faces[:, 1]]
         v2 = verts_rgb[faces[:, 2]]
         return ((v0 - v1).pow(2) + (v1 - v2).pow(2) + (v0 - v2).pow(2)).mean()
+    
+def saturation_loss(verts_rgb):
+    #reward distance from grey (0.5, 0.5, 0.5)
+    grey = torch.tensor([0.5, 0.5, 0.5], device=device)
+    return -((verts_rgb - grey).pow(2).sum(dim=-1).mean())
 
 for step in range(num_steps):
 
@@ -189,16 +197,11 @@ for step in range(num_steps):
         r = get_renderer(elev, azim)
         images = r(mesh_obj)
         image = images[0, ..., :3].permute(2, 0, 1).unsqueeze(0)   
-        image = TF.resize(image, [224, 224])
-        
-        # #normalise using CLIP's mean and std
-        # image = TF.normalize(image, 
-        #     mean=[0.48145466, 0.4578275,  0.40821073],
-        #     std= [0.26862954, 0.26130258, 0.27577711])
-        
         #normalise each crop using CLIP's mean and std
-        crops = get_augmented_crops(image, n_crops=8)
-        crops = TF.normalize(crops, mean=[0.48145466, 0.4578275,  0.40821073], std= [0.26862954, 0.26130258, 0.27577711])
+        crops = get_augmented_crops(image.squeeze(0), n_crops=8)
+        crops = TF.normalize(crops, 
+                             mean=[0.48145466, 0.4578275,  0.40821073], 
+                             std= [0.26862954, 0.26130258, 0.27577711])
 
         #encode all crops in one batch
         img_feats = clip_model.encode_image(crops)
@@ -213,9 +216,14 @@ for step in range(num_steps):
     colour_smooth_loss = colour_smoothness_loss(verts_rgb, faces)
 
     #colour smoothness weight: start high, decay to let CLIP sharpen details
-    colour_smooth_weight = 1.0 * (0.1 ** (step / num_steps))  # 1.0 -> 0.1
+    colour_smooth_weight = 1.0 * (0.1 ** (step / num_steps))  # 1.0 to 0.1
     
-    loss = clip_loss + colour_smooth_weight * colour_smooth_loss
+    #saturation loss to encourage more vibrant colours, especially early on when CLIP signal is weak
+    sat_loss = saturation_loss(verts_rgb)
+    
+    #combine losses - CLIP loss is primary, colour smoothness and saturation are secondary to guide early optimisation
+    loss = clip_loss + 0.05 * sat_loss + 0.1 * colour_smooth_loss
+    
     loss.backward()
     torch.nn.utils.clip_grad_norm_(mlp.parameters(), max_norm=1.0)
     optimiser.step()
