@@ -14,7 +14,6 @@ from pytorch3d.renderer import (
     MeshRenderer,
     MeshRasterizer,
     SoftPhongShader,
-    PointLights,
     AmbientLights,
     TexturesVertex,
     look_at_view_transform
@@ -22,8 +21,11 @@ from pytorch3d.renderer import (
 
 import os
 
-from google.colab import drive
-drive.mount('/content/drive')
+# If running in Google Colab, mount Google Drive to save outputs
+# - run comment below in a cell before the main code to enable saving outputs to Drive
+
+# from google.colab import drive
+# drive.mount('/content/drive')
 
 # Ensure output directory exists
 output_dir = "outputs"
@@ -112,7 +114,7 @@ class ColourMLP(nn.Module):
 
 mlp = ColourMLP(num_freqs=6).to(device)
 optimiser = torch.optim.Adam(mlp.parameters(), lr=1e-3)
-scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=200, gamma=0.5)
+scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=300, gamma=0.5)
 
 
 # ------------------------------- Renderer -------------------------------
@@ -145,7 +147,7 @@ def get_renderer(elev=0, azim=0):
 
 # ------------------------------- Optimisation Loop -------------------------------
 
-num_steps = 800
+num_steps = 1200
 eps = 1e-8
 viewpoints = [(20, 0), (20, 90), (20, 180), (20, 270), (60, 45), (-10, 45), (90, 0)]
 
@@ -189,13 +191,9 @@ for step in range(num_steps):
 
     #colour smooth loss to suppress noisy colour variation
     colour_smooth_loss = colour_smoothness_loss(verts_rgb, faces)
-    
-    for step in range(num_steps):
-        optimiser.zero_grad()
-        verts_rgb = mlp(verts)
-    
-        #colour smoothness weight: start high, decay to let CLIP sharpen details
-        colour_smooth_weight = 1.0 * (0.1 ** (step / num_steps))  # 1.0 -> 0.1
+
+    #colour smoothness weight: start high, decay to let CLIP sharpen details
+    colour_smooth_weight = 1.0 * (0.1 ** (step / num_steps))  # 1.0 -> 0.1
     
     loss = clip_loss + colour_smooth_weight * colour_smooth_loss
     loss.backward()
@@ -210,6 +208,11 @@ for step in range(num_steps):
 
     if step % 20 == 0:
         print(f"Step {step} | Loss: {loss.item():.4f}")
+        
+#final render image
+rendered = get_renderer(0, 0)(mesh_obj)[0, ..., :3].detach().cpu().numpy()
+rendered = (rendered * 255).astype(np.uint8)
+Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{num_steps}.png"))
 
 print("Optimisation complete.")
 
