@@ -133,7 +133,7 @@ def get_renderer(elev=0, azim=0):
     )
     
     #ambient light for flat lighting, no shadows
-    lights = AmbientLights(device=device, ambient_color=((0.8, 0.8, 0.8),))
+    lights = AmbientLights(device=device, ambient_color=((0.6, 0.6, 0.6),))
     
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(
@@ -149,14 +149,14 @@ def get_renderer(elev=0, azim=0):
 
 # ------------------------------- Optimisation Loop -------------------------------
 
-num_steps = 1200
+num_steps = 2000
 eps = 1e-8
 viewpoints = [(20, 0), (20, 90), (20, 180), (20, 270), (60, 45), (-10, 45), (90, 0)]
 
 def get_augmented_crops(image, n_crops=8):
     crops = []
     _, h, w = image.shape
-    min_size = min(h, w) // 2  #min crop size is half the image size
+    min_size = min(h, w) // 2  #min crop size is half the image dimension to ensure enough detail for CLIP to work with
     for _ in range(n_crops):
         scale = torch.FloatTensor(1).uniform_(0.5, 1.0).item()
         size = int(min_size + scale * (min(h, w) - min_size)) #used min_size as floor
@@ -212,11 +212,11 @@ for step in range(num_steps):
         
     clip_loss /= len(viewpoints)
 
-    #colour smooth loss to suppress noisy colour variation
+    #colour smoothness loss to suppress noisy colour variation - prevent blotches and encourage smoother colour transitions
     colour_smooth_loss = colour_smoothness_loss(verts_rgb, faces)
 
-    #colour smoothness weight: start high, decay to let CLIP sharpen details
-    colour_smooth_weight = 1.0 * (0.1 ** (step / num_steps))  # 1.0 to 0.1
+    # #colour smoothness weight: start high, decay to let CLIP sharpen details
+    # colour_smooth_weight = 1.0 * (0.1 ** (step / num_steps))  # 1.0 to 0.1
     
     #saturation loss to encourage more vibrant colours, especially early on when CLIP signal is weak
     sat_loss = saturation_loss(verts_rgb)
