@@ -148,7 +148,6 @@ def get_renderer(elev=0, azim=0):
         image_size=512,
         blur_radius=0.0,
         faces_per_pixel=1,
-        bin_size=0
     )
     
     #point lights to prevent CLIP seeing flat white/grey blobs - adds shading and depth cues to the render
