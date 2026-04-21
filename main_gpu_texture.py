@@ -1,3 +1,8 @@
+# main_gpu_texture.py:
+# This code optimises the vertex colours of a 3D mesh to match a text prompt using CLIP.
+# It uses a simple MLP with Fourier feature encoding to predict per-vertex RGB colours,
+# and a differentiable renderer to render the mesh from multiple viewpoints for CLIP loss calculation.
+
 import torch
 import torch.nn as nn
 import clip
@@ -23,14 +28,19 @@ import os
 
 import torchvision.transforms as T
 
+import site
+site.addsitedir('/content/drive/MyDrive/pytorch3d_cache')
+
 # If running in Google Colab, mount Google Drive to save outputs
 # - run comment below in a cell before the main code to enable saving outputs to Drive
 
 # from google.colab import drive
 # drive.mount('/content/drive')
 
+
+
 # Ensure output directory exists
-output_dir = "outputs"
+output_dir = "outputs_colour"
 if os.path.exists(output_dir):
     for f in os.listdir(output_dir):
         full_path = os.path.join(output_dir, f)

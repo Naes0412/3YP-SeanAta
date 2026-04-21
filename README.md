@@ -6,7 +6,7 @@ Tested on: RTX 3090 (sm_86) / RTX 4090 (sm_89), CUDA 12.x, Python 3.12
 
 ### 1. Clone repository
 git clone https://github.com/Naes0412/Third-Year-Project-Test-1.git
-cd Third-Year-Project-Test-1
+cd 3YP-SeanAta
 
 ### 2. Use a vast.ai instance
 When renting on vast.ai:
