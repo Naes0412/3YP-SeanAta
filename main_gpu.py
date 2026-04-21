@@ -12,7 +12,6 @@ import numpy as np
 from PIL import Image
 import torchvision.transforms.functional as TF
 import torchvision.transforms as T
-
 # PyTorch3D imports
 from pytorch3d.structures import Meshes
 from pytorch3d.renderer import (
@@ -21,17 +20,12 @@ from pytorch3d.renderer import (
     MeshRenderer,
     MeshRasterizer,
     SoftPhongShader,
+    PointLights,
     AmbientLights,
     TexturesVertex,
     look_at_view_transform
 )
-
 import os
-
-# If running in Google Colab, mount Google Drive to save outputs
-# - uncomment below to enable saving outputs to Drive
-# from google.colab import drive
-# drive.mount('/content/drive')
 
 # Ensure output directory exists
 output_dir = "outputs_deformation"
@@ -122,12 +116,11 @@ class DisplacementMLP(nn.Module):
 
     def forward(self, verts):
         encoded = self.enc(verts)
-        # displacement scale of 0.3 - enough for armor bulking
-        # but conservative enough to preserve human topology
-        return verts + 0.3 * self.net(encoded)
+        # displacement scale of 0.1 allows for significant shape changes while preventing extreme distortions
+        return verts + 0.1 * self.net(encoded)
 
 mlp = DisplacementMLP(num_freqs=6).to(device)
-optimiser = torch.optim.Adam(mlp.parameters(), lr=1e-3)
+optimiser = torch.optim.Adam(mlp.parameters(), lr=5e-4)
 scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=400, gamma=0.6)
 
 
@@ -155,9 +148,17 @@ def get_renderer(elev=0, azim=0):
         image_size=512,
         blur_radius=0.0,
         faces_per_pixel=1,
+        bin_size=0
     )
-    # ambient lighting to avoid shadow artefacts interfering with CLIP
-    lights = AmbientLights(device=device, ambient_color=((0.6, 0.6, 0.6),))
+    
+    #point lights to prevent CLIP seeing flat white/grey blobs - adds shading and depth cues to the render
+    lights = PointLights(
+        device=device,
+        location=[[2.0, 2.0, -2.0]],
+        ambient_color=[[0.4, 0.4, 0.4]],
+        diffuse_color=[[0.6, 0.6, 0.6]],
+        specular_color=[[0.2, 0.2, 0.2]]
+    )
 
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
@@ -234,7 +235,7 @@ for step in range(num_steps):
     centroid_loss = (verts.mean(dim=0) ** 2).sum()
 
     #displacement reg starts strong then decays to allow more deformation later
-    disp_weight = 0.1 * (0.1 ** (step / num_steps))  # 0.1 -> 0.01
+    disp_weight = 1.0 * (0.1 ** (step / num_steps))
     
     #combine - CLIP drives shape, regularisation preserves topology
     loss = clip_loss + 0.05 * lap_loss + disp_weight * disp_loss + 0.01 * centroid_loss

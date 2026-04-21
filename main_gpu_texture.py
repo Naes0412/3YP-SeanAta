@@ -12,7 +12,6 @@ import trimesh
 import numpy as np
 from PIL import Image
 import torchvision.transforms.functional as TF
-
 # PyTorch3D imports
 from pytorch3d.structures import Meshes
 from pytorch3d.renderer import (
@@ -25,18 +24,8 @@ from pytorch3d.renderer import (
     TexturesVertex,
     look_at_view_transform
 )
-
 import os
-
 import torchvision.transforms as T
-
-# If running in Google Colab, mount Google Drive to save outputs
-# - run comment below in a cell before the main code to enable saving outputs to Drive
-
-# from google.colab import drive
-# drive.mount('/content/drive')
-
-
 
 # Ensure output directory exists
 output_dir = "outputs_colour"
