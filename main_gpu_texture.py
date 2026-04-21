@@ -3,6 +3,8 @@
 # It uses a simple MLP with Fourier feature encoding to predict per-vertex RGB colours,
 # and a differentiable renderer to render the mesh from multiple viewpoints for CLIP loss calculation.
 
+import site
+site.addsitedir('/content/drive/MyDrive/pytorch3d_cache')
 import torch
 import torch.nn as nn
 import clip
@@ -27,9 +29,6 @@ from pytorch3d.renderer import (
 import os
 
 import torchvision.transforms as T
-
-import site
-site.addsitedir('/content/drive/MyDrive/pytorch3d_cache')
 
 # If running in Google Colab, mount Google Drive to save outputs
 # - run comment below in a cell before the main code to enable saving outputs to Drive

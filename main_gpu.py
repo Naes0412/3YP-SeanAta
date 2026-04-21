@@ -2,7 +2,8 @@
 # This code optimises the vertex positions of a 3D mesh to match a text prompt using CLIP.
 # It uses a simple MLP with Fourier feature encoding to predict per-vertex displacements,
 # and a differentiable renderer to render the mesh from multiple viewpoints for CLIP loss calculation.
-
+import site
+site.addsitedir('/content/drive/MyDrive/pytorch3d_cache')
 import torch
 import torch.nn as nn
 import clip
@@ -31,9 +32,6 @@ import os
 # - uncomment below to enable saving outputs to Drive
 # from google.colab import drive
 # drive.mount('/content/drive')
-
-import site
-site.addsitedir('/content/drive/MyDrive/pytorch3d_cache')
 
 # Ensure output directory exists
 output_dir = "outputs_deformation"
