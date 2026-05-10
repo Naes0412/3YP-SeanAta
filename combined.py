@@ -166,19 +166,28 @@ class DisplacementMLP(nn.Module):
     def forward(self, verts, normals):
         encoded = self.enc(verts)
         raw = self.net(encoded)
+        
+        #create mirrored version of each vertex
+        verts_mirrored = verts.clone()
+        verts_mirrored[:, 0] = -verts_mirrored[:, 0]
+        encoded_mirrored = self.enc(verts_mirrored)
+        raw_mirrored = self.net(encoded_mirrored)
+        
+        #average the displacement to force left/right symmetry
+        raw = (raw + raw_mirrored) * 0.5
+        
         y = verts[:, 1:2]
         x = verts[:, 0:1].abs()
-        
         #masks and scaling factors to encourage more deformation on torso, less on extremities, with a smooth gradient in between
         torso_mask     = ((y > -0.3) & (y < 0.45) & (x < 0.18)).float() 
         arm_mask       = ((y > -0.3) & (y < 0.35) & (x >= 0.18)).float()
         extremity_mask = ((y < -0.38) | (y > 0.45)).float() #head and feet only
         
-        
         scale = (0.01 * extremity_mask 
                  + 0.04 * arm_mask
                  + 0.02 * (1 - torso_mask - arm_mask - extremity_mask).clamp(min=0) 
                  + 0.14 * torso_mask)
+        
         return verts + scale * raw * normals
 
 
@@ -318,10 +327,10 @@ for step in range(num_steps):
     mesh_obj = Meshes(verts=[verts], faces=[faces], textures=textures)
     
     #initially freeze colour MLP to allow displacement MLP to find rough alignment, then unfreeze for joint optimisation
-    if step < 300:
+    if step < 500:
         for p in colour_mlp.parameters():
             p.requires_grad_(False)
-    elif step == 300:
+    elif step == 500:
         print("Unfreezing Colour MLP for joint optimisation.")
         for p in colour_mlp.parameters():
             p.requires_grad_(True)
@@ -329,9 +338,9 @@ for step in range(num_steps):
     #CLIP loss across viewpoints with augmented crops and negative prompt
     clip_loss = 0
     for elev, azim in viewpoints:
-        #use armour shape prompts for first 300 steps to focus on geometry, then switch to full prompts with colour details for joint optimisation
-        text_feat_vp = warmup_feats[(elev, azim)] if step < 300 else text_feats[(elev, azim)]
-        use_point_lights = (step < 300) #use point lights for deformation-only phase
+        #use armour shape prompts for first 500 steps to focus on geometry, then switch to full prompts with colour details for joint optimisation
+        text_feat_vp = warmup_feats[(elev, azim)] if step < 500 else text_feats[(elev, azim)]
+        use_point_lights = (step < 500) #use point lights for deformation-only phase
         r = get_renderer(elev, azim, use_point_lights=use_point_lights)
         images = r(mesh_obj)
         image = images[0, ..., :3].permute(2, 0, 1)
@@ -379,7 +388,7 @@ for step in range(num_steps):
 
     #gradient clipping: allow larger steps early on for more exploration, then reduce to stabilise fine-tuning
     # - during initial deformation phase, allow larger gradients for DisplacementMLP
-    max_norm = 1.0 if step < 300 else (0.25 if step < 600 else 1.0)
+    max_norm = 1.0 if step < 500 else (0.25 if step < 800 else 1.0)
     torch.nn.utils.clip_grad_norm_(displacement_mlp.parameters(), max_norm=max_norm)
     torch.nn.utils.clip_grad_norm_(colour_mlp.parameters(), max_norm=1.0)
 
@@ -394,7 +403,7 @@ for step in range(num_steps):
         Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{step}.png"))
         
         #during initial deformation phase, also save a shaded render so geometry changes can be seen
-        if step < 300:
+        if step < 500:
             rendered_shaded = get_renderer(20, 0, use_point_lights=True)(mesh_obj)[0, ..., :3].detach().cpu().numpy()
             rendered_shaded = (rendered_shaded * 255).astype(np.uint8)
             Image.fromarray(rendered_shaded).save(os.path.join(output_dir, f"render_shaded_{step}.png"))
