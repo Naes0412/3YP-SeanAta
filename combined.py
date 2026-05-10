@@ -157,9 +157,9 @@ class DisplacementMLP(nn.Module):
         
         
         scale = (0.01 * extremity_mask 
-                 + 0.01 * arm_mask
+                 + 0.02 * arm_mask
                  + 0.02 * (1 - torso_mask - arm_mask - extremity_mask).clamp(min=0) 
-                 + 0.08 * torso_mask)
+                 + 0.12 * torso_mask)
         return verts + scale * raw * normals
 
 
@@ -287,6 +287,15 @@ for step in range(num_steps):
 
     textures = TexturesVertex(verts_features=verts_rgb.unsqueeze(0))
     mesh_obj = Meshes(verts=[verts], faces=[faces], textures=textures)
+    
+    #initially freeze colour MLP to allow displacement MLP to find rough alignment, then unfreeze for joint optimisation
+    if step < 300:
+        for p in colour_mlp.parameters():
+            p.requires_grad_(False)
+    elif step == 300:
+        print("Unfreezing Colour MLP for joint optimisation.")
+        for p in colour_mlp.parameters():
+            p.requires_grad_(True)
 
     #CLIP loss across viewpoints with augmented crops and negative prompt
     clip_loss = 0
@@ -323,9 +332,9 @@ for step in range(num_steps):
     colour_smooth_loss = colour_smoothness_loss(verts_rgb, faces)
     sat_loss = saturation_loss(verts_rgb)
     
-    sat_weight = 0.05 * (0.3 ** (step / num_steps))  #decay saturation loss weight over time to allow more colour freedom later on
-    disp_weight = 3.0 * (0.1 ** (step / num_steps)) #decay displacement regularisation weight
-    colour_smooth_weight = 0.5 * (0.1 ** (step / num_steps))  #decay colour smoothness weight
+    sat_weight = 0.03 * (0.5 ** (step / num_steps)) + 0.01  #decay saturation loss weight over time, up to a floor of 0.01, to allow more colour freedom later on
+    disp_weight = 0.5 * (0.1 ** (step / num_steps)) #decay displacement regularisation weight
+    colour_smooth_weight = 0.3 * (0.3 ** (step / num_steps)) + 0.05  #decay colour smoothness weight, up to a floor of 0.05
 
     #Combined loss
     loss = (clip_loss
