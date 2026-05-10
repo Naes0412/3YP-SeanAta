@@ -21,6 +21,7 @@ from pytorch3d.renderer import (
     MeshRasterizer,
     SoftPhongShader,
     AmbientLights,
+    PointLights,
     TexturesVertex,
     look_at_view_transform
 )
@@ -46,7 +47,7 @@ else:
 device = torch.device("cuda")
 
 
-# ------------------------------- Load CLIP -------------------------------
+# ------------------------------- Load CLIP and Prompting -------------------------------
 
 clip_model, clip_preprocess = clip.load("ViT-B/16", device=device)
 clip_model.eval()
@@ -82,6 +83,23 @@ with torch.no_grad():
     neg_feat = clip_model.encode_text(neg_tokens)
     neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
     print("Encoded negative prompt.")
+    
+warmup_prompts = {
+    (20, 0):   "a 3D render of Iron Man armor, raised chest plate, shoulder pauldrons, front view",
+    (20, 90):  "a 3D render of Iron Man armor, armor plating on arms, side view",
+    (20, 180): "a 3D render of Iron Man armor, back armor panels, side view",
+    (20, 270): "a 3D render of Iron Man armor, armor plating on arms, side view",
+    (60, 45):  "a 3D render of Iron Man armor, helmet dome, shoulder armor, overhead view",
+    (-10, 45): "a 3D render of Iron Man armor, leg armor panels, low angle view",
+    (90, 0):   "a 3D render of Iron Man armor, helmet top, top down view",
+}
+
+warmup_feats = {}
+with torch.no_grad():
+    for vp, prompt in warmup_prompts.items():
+        tokens = clip.tokenize([prompt]).to(device)
+        feat = clip_model.encode_text(tokens)
+        warmup_feats[vp] = feat / feat.norm(dim=-1, keepdim=True)
 
 
 # ------------------------------- Load Mesh -------------------------------
@@ -151,15 +169,16 @@ class DisplacementMLP(nn.Module):
         y = verts[:, 1:2]
         x = verts[:, 0:1].abs()
         
-        torso_mask = ((y.abs() < 0.3) & (x < 0.15)).float()
-        arm_mask = ((y.abs() < 0.3) & (x >= 0.15)).float()
-        extremity_mask = ((y < -0.38) | (y > 0.42)).float() #feet and head
+        #masks and scaling factors to encourage more deformation on torso, less on extremities, with a smooth gradient in between
+        torso_mask     = ((y > -0.3) & (y < 0.45) & (x < 0.18)).float() 
+        arm_mask       = ((y > -0.3) & (y < 0.35) & (x >= 0.18)).float()
+        extremity_mask = ((y < -0.38) | (y > 0.45)).float() #head and feet only
         
         
         scale = (0.01 * extremity_mask 
-                 + 0.02 * arm_mask
+                 + 0.04 * arm_mask
                  + 0.02 * (1 - torso_mask - arm_mask - extremity_mask).clamp(min=0) 
-                 + 0.12 * torso_mask)
+                 + 0.14 * torso_mask)
         return verts + scale * raw * normals
 
 
@@ -215,7 +234,7 @@ def get_augmented_crops(image, n_crops=8):
 
 # ------------------------------- Renderer -------------------------------
 
-def get_renderer(elev=0, azim=0):
+def get_renderer(elev=0, azim=0, use_point_lights=False):
     R, T = look_at_view_transform(2.0, elev, azim)
     cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=30)
     raster_settings = RasterizationSettings(
@@ -223,7 +242,17 @@ def get_renderer(elev=0, azim=0):
         blur_radius=0.0,
         faces_per_pixel=1,
     )
-    lights = AmbientLights(device=device, ambient_color=((0.8, 0.8, 0.8),))
+    if use_point_lights:
+        lights = PointLights(
+            device=device, 
+            location=((0.0, 1.0, 2.0),), 
+            ambient_color=((0.4, 0.4, 0.4),),
+            diffuse_color=((0.6, 0.6, 0.6),),
+            specular_color=((0.1, 0.1, 0.1),)
+        )
+    else:
+        lights = AmbientLights(device=device, ambient_color=((0.8, 0.8, 0.8),))
+        
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
         shader=SoftPhongShader(device=device, cameras=cameras, lights=lights)
@@ -300,8 +329,10 @@ for step in range(num_steps):
     #CLIP loss across viewpoints with augmented crops and negative prompt
     clip_loss = 0
     for elev, azim in viewpoints:
-        text_feat_vp = text_feats[(elev, azim)]
-        r = get_renderer(elev, azim)
+        #use armour shape prompts for first 300 steps to focus on geometry, then switch to full prompts with colour details for joint optimisation
+        text_feat_vp = warmup_feats[(elev, azim)] if step < 300 else text_feats[(elev, azim)]
+        use_point_lights = (step < 300) #use point lights for deformation-only phase
+        r = get_renderer(elev, azim, use_point_lights=use_point_lights)
         images = r(mesh_obj)
         image = images[0, ..., :3].permute(2, 0, 1)
         alpha = images[0, ..., 3]
@@ -318,7 +349,7 @@ for step in range(num_steps):
 
         pos_sim = torch.cosine_similarity(img_feats, text_feat_vp.expand(8, -1))
         neg_sim = torch.cosine_similarity(img_feats, neg_feat.expand(8, -1))
-        #Maximise similarity to Iron Man prompt, minimise similarity to plain human body
+        #maximise similarity to Iron Man prompt, minimise similarity to plain human body
         clip_loss = clip_loss + (1 - pos_sim + neg_sim).mean()
 
     clip_loss = clip_loss / len(viewpoints)
@@ -346,8 +377,9 @@ for step in range(num_steps):
 
     loss.backward()
 
-    #tighter gradient clipping early on, relax after step 500
-    max_norm = 0.25 if step < 500 else 1.0
+    #gradient clipping: allow larger steps early on for more exploration, then reduce to stabilise fine-tuning
+    # - during initial deformation phase, allow larger gradients for DisplacementMLP
+    max_norm = 1.0 if step < 300 else (0.25 if step < 600 else 1.0)
     torch.nn.utils.clip_grad_norm_(displacement_mlp.parameters(), max_norm=max_norm)
     torch.nn.utils.clip_grad_norm_(colour_mlp.parameters(), max_norm=1.0)
 
@@ -360,6 +392,12 @@ for step in range(num_steps):
         rendered = get_renderer(20, 0)(mesh_obj)[0, ..., :3].detach().cpu().numpy()
         rendered = (rendered * 255).astype(np.uint8)
         Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{step}.png"))
+        
+        #during initial deformation phase, also save a shaded render so geometry changes can be seen
+        if step < 300:
+            rendered_shaded = get_renderer(20, 0, use_point_lights=True)(mesh_obj)[0, ..., :3].detach().cpu().numpy()
+            rendered_shaded = (rendered_shaded * 255).astype(np.uint8)
+            Image.fromarray(rendered_shaded).save(os.path.join(output_dir, f"render_shaded_{step}.png"))
 
     if step % 20 == 0:
         print(f"Step {step:4d} | Loss: {loss.item():.4f} | CLIP: {clip_loss.item():.4f} | "
