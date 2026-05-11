@@ -179,13 +179,15 @@ class DisplacementMLP(nn.Module):
         y = verts[:, 1:2]
         x = verts[:, 0:1].abs()
         #masks and scaling factors to encourage more deformation on torso, less on extremities, with a smooth gradient in between
-        torso_mask     = ((y > -0.3) & (y < 0.45) & (x < 0.18)).float() 
-        arm_mask       = ((y > -0.3) & (y < 0.35) & (x >= 0.18)).float()
+        torso_mask = ((y > -0.3) & (y < 0.45) & (x < 0.18)).float() 
+        arm_mask = ((y > -0.3) & (y < 0.35) & (x >= 0.18)).float()
+        hip_leg_mask = ((y > -0.38) & (y < -0.1)).float()
         extremity_mask = ((y < -0.38) | (y > 0.45)).float() #head and feet only
         
         scale = (0.01 * extremity_mask 
                  + 0.04 * arm_mask
-                 + 0.02 * (1 - torso_mask - arm_mask - extremity_mask).clamp(min=0) 
+                 + 0.03 * hip_leg_mask
+                 + 0.02 * (1 - torso_mask - arm_mask - hip_leg_mask - extremity_mask).clamp(min=0) 
                  + 0.14 * torso_mask)
         
         return verts + scale * raw * normals
@@ -260,7 +262,7 @@ def get_renderer(elev=0, azim=0, use_point_lights=False):
             specular_color=((0.1, 0.1, 0.1),)
         )
     else:
-        lights = AmbientLights(device=device, ambient_color=((0.8, 0.8, 0.8),))
+        lights = AmbientLights(device=device, ambient_color=((1.0, 1.0, 1.0),))
         
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
@@ -269,8 +271,10 @@ def get_renderer(elev=0, azim=0, use_point_lights=False):
     return renderer
 
 
-# ------------------------------- Regularisation Losses -------------------------------
+# ------------------------------- Losses -------------------------------
 
+#encourages smoother surfaces and penalises extreme distortions
+# - by comparing each vertex to the mean of its 1-ring neighbours
 def laplacian_smoothness_loss(verts, faces):
     neighbour_sum = torch.zeros_like(verts)
     neighbour_count = torch.zeros(verts.shape[0], 1, device=verts.device)
@@ -285,24 +289,33 @@ with torch.no_grad():
     lap_baseline = laplacian_smoothness_loss(verts_init, faces).clamp(min=1e-12)
     print(f"Laplacian baseline: {lap_baseline.item():.2e}")
 
-
+#encourages smaller displacements to prevent extreme deformations
 def displacement_regularisation(verts, verts_init):
     diff = verts - verts_init
     weights = torch.tensor([1.0, 3.0, 1.0], device=device)
     return (diff ** 2 * weights).mean()
 
-
+#encourages smooth colour transitions across the surface to avoid noisy colours
 def colour_smoothness_loss(verts_rgb, faces):
     v0 = verts_rgb[faces[:, 0]]
     v1 = verts_rgb[faces[:, 1]]
     v2 = verts_rgb[faces[:, 2]]
     return ((v0 - v1).pow(2) + (v1 - v2).pow(2) + (v0 - v2).pow(2)).mean()
 
-
+#encourages more saturated colours to make more vibrant red/gold
 def saturation_loss(verts_rgb):
     grey = torch.tensor([0.5, 0.5, 0.5], device=device)
     return -((verts_rgb - grey).pow(2).sum(dim=-1).mean())
 
+#penalises overly white vertices to avoid white spots on mesh
+def white_penalty_loss(verts_rgb):
+    whiteness = verts_rgb.mean(dim=-1)
+    return whiteness.mean()
+
+#encourages brightness to remain above a certain threshold to avoid overly dark patches
+def brightness_loss(verts_rgb):
+    mean_brightness = verts_rgb.mean()
+    return torch.relu(0.35 - mean_brightness)
 
 # ------------------------------- Optimisation Loop -------------------------------
 
@@ -382,7 +395,9 @@ for step in range(num_steps):
             + disp_weight * disp_loss
             + 0.01 * centroid_loss
             + colour_smooth_weight * colour_smooth_loss
-            + sat_weight * sat_loss)
+            + sat_weight * sat_loss
+            + 0.05 * white_penalty_loss(verts_rgb)
+            + 0.1 * brightness_loss(verts_rgb))
 
     loss.backward()
 
