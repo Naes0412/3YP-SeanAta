@@ -85,12 +85,12 @@ with torch.no_grad():
     print("Encoded negative prompt.")
     
 warmup_prompts = {
-    (20, 0):   "a 3D render of Iron Man armor, raised chest plate, shoulder pauldrons, front view",
-    (20, 90):  "a 3D render of Iron Man armor, armor plating on arms, side view",
-    (20, 180): "a 3D render of Iron Man armor, back armor panels, side view",
-    (20, 270): "a 3D render of Iron Man armor, armor plating on arms, side view",
-    (60, 45):  "a 3D render of Iron Man armor, helmet dome, shoulder armor, overhead view",
-    (-10, 45): "a 3D render of Iron Man armor, leg armor panels, low angle view",
+    (20, 0):   "a 3D render of Iron Man armor, raised chest plate, shoulder pauldrons, bicep plates, front view",
+    (20, 90):  "a 3D render of Iron Man armor, arm armor plating, thigh armor, side view",
+    (20, 180): "a 3D render of Iron Man armor, back armor panels, shoulder blades, side view",
+    (20, 270): "a 3D render of Iron Man armor, arm armor plating, thigh armor, side view",
+    (60, 45):  "a 3D render of Iron Man armor, helmet dome, shoulder pauldrons, overhead view",
+    (-10, 45): "a 3D render of Iron Man armor, shin guards, thigh armor panels, low angle view",
     (90, 0):   "a 3D render of Iron Man armor, helmet top, top down view",
 }
 
@@ -178,17 +178,29 @@ class DisplacementMLP(nn.Module):
         
         y = verts[:, 1:2]
         x = verts[:, 0:1].abs()
-        #masks and scaling factors to encourage more deformation on torso, less on extremities, with a smooth gradient in between
-        torso_mask = ((y > -0.3) & (y < 0.45) & (x < 0.18)).float() 
-        arm_mask = ((y > -0.3) & (y < 0.35) & (x >= 0.18)).float()
-        hip_leg_mask = ((y > -0.38) & (y < -0.1)).float()
-        extremity_mask = ((y < -0.38) | (y > 0.45)).float() #head and feet only
+        z = verts[:, 2:3]
+        #masks and scaling factors to encourage more/less deformation on the body part
+        torso_mask     = ((y > -0.1) & (y < 0.45) & (x < 0.18)).float()
+        shoulder_mask  = ((y > 0.30) & (y < 0.45) & (x >= 0.12)).float()
+        upper_arm_mask = ((y > 0.05) & (y < 0.30) & (x >= 0.18)).float()
+        lower_arm_mask = ((y > -0.10) & (y <= 0.05) & (x >= 0.18)).float()
+        thigh_mask     = ((y > -0.25) & (y <= -0.10)).float()
+        shin_mask      = ((y > -0.38) & (y <= -0.25)).float()
+        extremity_mask = ((y < -0.38) | (y > 0.45)).float()
+
+        scale = (0.01 * extremity_mask
+                + 0.18 * shoulder_mask   # pauldrons need to pop out clearly
+                + 0.07 * upper_arm_mask  # bicep/tricep plates
+                + 0.05 * lower_arm_mask  # forearm plates
+                + 0.08 * thigh_mask      # thigh armour
+                + 0.06 * shin_mask       # shin guards
+                + 0.02 * (1 - torso_mask - shoulder_mask - upper_arm_mask
+                            - lower_arm_mask - thigh_mask - shin_mask
+                            - extremity_mask).clamp(min=0)
+                + 0.20 * torso_mask)
         
-        scale = (0.01 * extremity_mask 
-                 + 0.04 * arm_mask
-                 + 0.03 * hip_leg_mask
-                 + 0.02 * (1 - torso_mask - arm_mask - hip_leg_mask - extremity_mask).clamp(min=0) 
-                 + 0.14 * torso_mask)
+        front_boost = (z > 0.0).float() * 0.06  # front-facing vertices get extra push
+        scale = scale + front_boost * torso_mask
         
         return verts + scale * raw * normals
 
@@ -307,15 +319,10 @@ def saturation_loss(verts_rgb):
     grey = torch.tensor([0.5, 0.5, 0.5], device=device)
     return -((verts_rgb - grey).pow(2).sum(dim=-1).mean())
 
-#penalises overly white vertices to avoid white spots on mesh
-def white_penalty_loss(verts_rgb):
-    whiteness = verts_rgb.mean(dim=-1)
-    return whiteness.mean()
-
-#encourages brightness to remain above a certain threshold to avoid overly dark patches
-def brightness_loss(verts_rgb):
-    mean_brightness = verts_rgb.mean()
-    return torch.relu(0.35 - mean_brightness)
+#penalises pure white vertices
+def colour_variance_loss(verts_rgb):
+    chroma = verts_rgb.max(dim=-1).values - verts_rgb.min(dim=-1).values
+    return torch.relu(0.3 - chroma).mean()
 
 # ------------------------------- Optimisation Loop -------------------------------
 
@@ -385,19 +392,18 @@ for step in range(num_steps):
     colour_smooth_loss = colour_smoothness_loss(verts_rgb, faces)
     sat_loss = saturation_loss(verts_rgb)
     
-    sat_weight = 0.03 * (0.5 ** (step / num_steps)) + 0.01  #decay saturation loss weight over time, up to a floor of 0.01, to allow more colour freedom later on
-    disp_weight = 0.5 * (0.1 ** (step / num_steps)) #decay displacement regularisation weight
+    sat_weight = 0.05 * (0.5 ** (step / num_steps)) + 0.03  #decay saturation loss weight over time, up to a floor of 0.03, to allow more colour freedom later on
+    disp_weight = 0.2 * (0.1 ** (step / num_steps)) #decay displacement regularisation weight
     colour_smooth_weight = 0.3 * (0.3 ** (step / num_steps)) + 0.05  #decay colour smoothness weight, up to a floor of 0.05
 
     #Combined loss
     loss = (clip_loss
-            + 1.0 * lap_loss
+            + 0.7 * lap_loss
             + disp_weight * disp_loss
             + 0.01 * centroid_loss
             + colour_smooth_weight * colour_smooth_loss
             + sat_weight * sat_loss
-            + 0.05 * white_penalty_loss(verts_rgb)
-            + 0.1 * brightness_loss(verts_rgb))
+            + 0.15 * colour_variance_loss(verts_rgb))
 
     loss.backward()
 
