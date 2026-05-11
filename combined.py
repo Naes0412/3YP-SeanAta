@@ -59,13 +59,13 @@ base_prompt = "a 3D render of Iron Man armor, red and gold metallic suit, superh
 #View-dependent prompts inspired by DreamFusion (Poole et al., NeurIPS 2022)
 # - direction suffixes reduce the Janus problem and give CLIP per-view shape+colour signal
 viewpoint_prompts = {
-    (20, 0):   f"{base_prompt}, front view, red chest plate",
-    (20, 90):  f"{base_prompt}, side view, gold arm",
-    (20, 180): f"{base_prompt}, back view, red and gold back",
-    (20, 270): f"{base_prompt}, side view, gold arm",
-    (60, 45):  f"{base_prompt}, overhead view, red helmet",
-    (-10, 45): f"{base_prompt}, low angle view, gold legs",
-    (90, 0):   f"{base_prompt}, top down view, red helmet",
+    (20, 0): f"{base_prompt}, front view, red chest plate, glowing blue arc reactor",
+    (20, 90): f"{base_prompt}, side view, gold arm guards, red shoulder",  
+    (20, 180):f"{base_prompt}, back view, red and gold back panels",
+    (20, 270): f"{base_prompt}, side view, gold arm guards, red shoulder",
+    (60, 45): f"{base_prompt}, overhead view, red helmet, gold face plate",
+    (-10, 45): f"{base_prompt}, low angle view, gold knee guards, red thighs",
+    (90, 0): f"{base_prompt}, top down view, red helmet",
 }
 
 #precompute all text features once before training
@@ -180,6 +180,7 @@ class DisplacementMLP(nn.Module):
         x = verts[:, 0:1].abs()
         z = verts[:, 2:3]
         #masks and scaling factors to encourage more/less deformation on the body part
+        head_mask = (y > 0.38).float() 
         torso_mask     = ((y > -0.1) & (y < 0.45) & (x < 0.18)).float()
         shoulder_mask  = ((y > 0.30) & (y < 0.45) & (x >= 0.12)).float()
         upper_arm_mask = ((y > 0.05) & (y < 0.30) & (x >= 0.18)).float()
@@ -188,16 +189,17 @@ class DisplacementMLP(nn.Module):
         shin_mask      = ((y > -0.38) & (y <= -0.25)).float()
         extremity_mask = ((y < -0.38) | (y > 0.45)).float()
 
-        scale = (0.01 * extremity_mask
-                + 0.18 * shoulder_mask   # pauldrons need to pop out clearly
-                + 0.07 * upper_arm_mask  # bicep/tricep plates
-                + 0.05 * lower_arm_mask  # forearm plates
-                + 0.08 * thigh_mask      # thigh armour
-                + 0.06 * shin_mask       # shin guards
+        scale = (0.01 * head_mask
+                + 0.01 * extremity_mask * (1 - head_mask) #hands and feet
+                + 0.18 * shoulder_mask * (1 - head_mask) #pauldrons
+                + 0.07 * upper_arm_mask #bicep/tricep plates
+                + 0.05 * lower_arm_mask #forearm plates
+                + 0.08 * thigh_mask #thigh armour
+                + 0.06 * shin_mask #shin guards
                 + 0.02 * (1 - torso_mask - shoulder_mask - upper_arm_mask
                             - lower_arm_mask - thigh_mask - shin_mask
-                            - extremity_mask).clamp(min=0)
-                + 0.20 * torso_mask)
+                            - extremity_mask - head_mask).clamp(min=0)
+                + 0.20 * torso_mask * (1 - head_mask))
         
         front_boost = (z > 0.0).float() * 0.06  # front-facing vertices get extra push
         scale = scale + front_boost * torso_mask
@@ -394,7 +396,7 @@ for step in range(num_steps):
     
     sat_weight = 0.05 * (0.5 ** (step / num_steps)) + 0.03  #decay saturation loss weight over time, up to a floor of 0.03, to allow more colour freedom later on
     disp_weight = 0.2 * (0.1 ** (step / num_steps)) #decay displacement regularisation weight
-    colour_smooth_weight = 0.3 * (0.3 ** (step / num_steps)) + 0.05  #decay colour smoothness weight, up to a floor of 0.05
+    colour_smooth_weight = 0.3 * (0.3 ** (step / num_steps)) + 0.10  #decay colour smoothness weight, up to a floor of 0.10
 
     #Combined loss
     loss = (clip_loss
