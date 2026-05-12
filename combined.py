@@ -405,7 +405,7 @@ for step in range(num_steps):
             + 0.01 * centroid_loss
             + colour_smooth_weight * colour_smooth_loss
             + sat_weight * sat_loss
-            + 0.15 * colour_variance_loss(verts_rgb))
+            + 0.10 * colour_variance_loss(verts_rgb))
 
     loss.backward()
 
