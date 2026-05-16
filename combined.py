@@ -59,7 +59,7 @@ base_prompt = "a 3D render of Iron Man armor, red and gold metallic suit, superh
 #View-dependent prompts inspired by DreamFusion (Poole et al., NeurIPS 2022)
 # - direction suffixes reduce the Janus problem and give CLIP per-view shape+colour signal
 viewpoint_prompts = {
-    (20, 0): f"{base_prompt}, front view, red chest plate, glowing blue arc reactor",
+    (20, 0): f"{base_prompt}, front view, red chest plate, gold arc reactor",
     (20, 90): f"{base_prompt}, side view, gold arm guards, red shoulder",  
     (20, 180):f"{base_prompt}, back view, red and gold back panels",
     (20, 270): f"{base_prompt}, side view, gold arm guards, red shoulder",
