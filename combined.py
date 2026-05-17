@@ -27,6 +27,10 @@ from pytorch3d.renderer import (
 )
 import os
 import logging
+import imageio.v2 as imageio
+import glob
+import re
+import shutil
 
 #suppress PyTorch3D bin size warning
 logging.getLogger("pytorch3d").setLevel(logging.ERROR)
@@ -36,8 +40,10 @@ output_dir = "outputs_combined"
 if os.path.exists(output_dir):
     for f in os.listdir(output_dir):
         full_path = os.path.join(output_dir, f)
-        if os.path.isfile(full_path):
+        if os.path.isfile(full_path): #clears old renders and final mesh from previous run
             os.remove(full_path)
+        elif os.path.isdir(full_path): #clears subdirs like turntable_frames if they exist from a previous run
+            shutil.rmtree(full_path)
 else:
     os.makedirs(output_dir)
 
@@ -59,13 +65,15 @@ base_prompt = "a 3D render of Iron Man armor, red and gold metallic suit, superh
 #View-dependent prompts inspired by DreamFusion (Poole et al., NeurIPS 2022)
 # - direction suffixes reduce the Janus problem and give CLIP per-view shape+colour signal
 viewpoint_prompts = {
-    (20, 0): f"{base_prompt}, front view, red chest plate, gold arc reactor",
+    (20, 0): f"{base_prompt}, front view, red chest plate, gold details",
     (20, 90): f"{base_prompt}, side view, gold arm guards, red shoulder",  
     (20, 180):f"{base_prompt}, back view, red and gold back panels",
     (20, 270): f"{base_prompt}, side view, gold arm guards, red shoulder",
-    (60, 45): f"{base_prompt}, overhead view, red helmet, gold face plate",
+    (60, 45): f"{base_prompt}, overhead view, red helmet, gold face",
     (-10, 45): f"{base_prompt}, low angle view, gold knee guards, red thighs",
     (90, 0): f"{base_prompt}, top down view, red helmet",
+    (20, 45): f"{base_prompt}, front-side diagonal view, red arm plate, gold thigh armour",
+    (20, 315): f"{base_prompt}, front-side diagonal view, red arm plate, gold thigh armour"
 }
 
 #precompute all text features once before training
@@ -80,7 +88,7 @@ with torch.no_grad():
 
 #negative prompt: push away from plain unarmoured human appearance
 with torch.no_grad():
-    neg_tokens = clip.tokenize(["a plain human body, smooth skin, no armor, black suit, dark clothing"]).to(device)
+    neg_tokens = clip.tokenize(["a plain human body, smooth skin, no armor, no suit"]).to(device)
     neg_feat = clip_model.encode_text(neg_tokens)
     neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
     print("Encoded negative prompt.")
@@ -94,6 +102,8 @@ warmup_prompts = {
     (60, 45):  "a 3D render of Iron Man armor, helmet dome, shoulder pauldrons, overhead view",
     (-10, 45): "a 3D render of Iron Man armor, shin guards, thigh armor panels, low angle view",
     (90, 0):   "a 3D render of Iron Man armor, helmet top, top down view",
+    (20, 45):  "a 3D render of Iron Man armor, arm armor plating, thigh armor panels, diagonal view",
+    (20, 315): "a 3D render of Iron Man armor, arm armor plating, thigh armor panels, diagonal view",
 }
 
 warmup_feats = {}
@@ -194,18 +204,23 @@ class DisplacementMLP(nn.Module):
         scale = (0.01 * head_mask
                 + 0.01 * extremity_mask * (1 - head_mask) #hands and feet
                 + 0.18 * shoulder_mask * (1 - head_mask) #pauldrons
-                + 0.07 * upper_arm_mask #bicep/tricep plates
-                + 0.05 * lower_arm_mask #forearm plates
-                + 0.08 * thigh_mask #thigh armour
-                + 0.06 * shin_mask #shin guards
+                + 0.12 * upper_arm_mask #bicep/tricep plates
+                + 0.10 * lower_arm_mask #forearm plates
+                + 0.14 * thigh_mask #thigh armour
+                + 0.10 * shin_mask #shin guards
                 + 0.02 * (1 - torso_mask - shoulder_mask - upper_arm_mask
                             - lower_arm_mask - thigh_mask - shin_mask
                             - extremity_mask - head_mask).clamp(min=0)
                 + 0.20 * torso_mask * (1 - head_mask))
         
-        front_boost = (z > 0.0).float() * 0.06  # front-facing vertices get extra push
+        #front-facing vertices get extra push
+        front_boost = (z > 0.0).float() * 0.06  
         scale = scale + front_boost * torso_mask
         
+        #arms get extra push on front half to encourage them to wrap around the body rather than just bulging outwards
+        arm_front_boost = (z > 0.0).float() * 0.04
+        scale = scale + arm_front_boost * (upper_arm_mask + lower_arm_mask)
+
         return verts + scale * raw * normals
 
 
@@ -328,11 +343,24 @@ def colour_variance_loss(verts_rgb):
     chroma = verts_rgb.max(dim=-1).values - verts_rgb.min(dim=-1).values
     return torch.relu(0.3 - chroma).mean()
 
+#penalise mean brightness below 0.4 — push colours to be vivid not dark
+def brightness_loss(verts_rgb):
+    return torch.relu(0.4 - verts_rgb.mean(dim=-1)).mean()
+
 # ------------------------------- Optimisation Loop -------------------------------
 
 num_steps = 2000
 eps = 1e-8
-viewpoints = [(20, 0), (20, 90), (20, 180), (20, 270), (60, 45), (-10, 45), (90, 0)]
+viewpoints = [(20, 0), #front, torso
+              (20, 90), #side, arms/legs
+              (20, 180), #back
+              (20, 270), #other side, arms/legs
+              (60, 45), #overhead
+              (-10, 45), #low angle, shins/feet
+              (90, 0), #top down, head/shoulders
+              (20, 45), #front-side diagonal, arm/leg
+              (20, 315) #other front-side diagonal, arm/leg
+              ]
 
 print(f"\nStarting combined optimisation for {num_steps} steps...")
 
@@ -402,12 +430,13 @@ for step in range(num_steps):
 
     #Combined loss
     loss = (clip_loss
-            + 0.7 * lap_loss
+            + 0.85 * lap_loss
             + disp_weight * disp_loss
             + 0.01 * centroid_loss
             + colour_smooth_weight * colour_smooth_loss
             + sat_weight * sat_loss
-            + 0.10 * colour_variance_loss(verts_rgb))
+            + 0.10 * colour_variance_loss(verts_rgb)
+            + 0.15 * brightness_loss(verts_rgb))
 
     loss.backward()
 
@@ -442,6 +471,14 @@ for step in range(num_steps):
 rendered = get_renderer(20, 0)(mesh_obj)[0, ..., :3].detach().cpu().numpy()
 rendered = (rendered * 255).astype(np.uint8)
 Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{num_steps}.png"))
+print("Saved final render.")
+
+#final render shaded to show geometry
+rendered_shaded = get_renderer(20, 0, use_point_lights=True)(mesh_obj)[0, ..., :3].detach().cpu().numpy()
+rendered_shaded = (rendered_shaded * 255).astype(np.uint8)
+Image.fromarray(rendered_shaded).save(os.path.join(output_dir, f"render_shaded_{num_steps}.png"))
+print("Saved final render shaded.")
+
 print("Optimisation complete.")
 
 
@@ -458,3 +495,53 @@ final_mesh = trimesh.Trimesh(
 )
 final_mesh.export(os.path.join(output_dir, "final_result.obj"))
 print("Saved final_result.obj")
+
+
+# ------------------------------- Video Rendering -------------------------------
+
+#optimisation progress video
+render_files = sorted(
+    glob.glob(os.path.join(output_dir, "render_[0-9]*.png")),
+    key=lambda x: int(re.search(r'render_(\d+)\.png', x).group(1))
+)
+
+writer = imageio.get_writer(
+    os.path.join(output_dir, "optimisation_progress.mp4"), fps=15
+)
+for f in render_files:
+    frame = imageio.imread(f)
+    step_num = int(re.search(r'render_(\d+)\.png', f).group(1))
+    #slow down warmup phase (geometry only) by repeating frames
+    #faster through combined phase since changes are more dramatic
+    repeats = 3 if step_num < 500 else 1
+    for _ in range(repeats):
+        writer.append_data(frame)
+writer.close()
+print(f"Progress video saved: {len(render_files)} frames.")
+
+#turntable video of final mesh
+print("Rendering turntable...")
+turntable_dir = os.path.join(output_dir, "turntable_frames")
+os.makedirs(turntable_dir, exist_ok=True)
+
+#use the final mesh_obj still in memory from the optimisation loop
+with torch.no_grad():
+    for azim in range(0, 360, 4): #90 frames, smooth 360
+        r = get_renderer(20, azim, use_point_lights=False)
+        rendered = r(mesh_obj)[0, ..., :3].detach().cpu().numpy()
+        rendered = (rendered * 255).astype(np.uint8)
+        Image.fromarray(rendered).save(
+            os.path.join(turntable_dir, f"turntable_{azim:03d}.png")
+        )
+
+turntable_files = sorted(glob.glob(os.path.join(turntable_dir, "turntable_*.png")))
+turntable_frames = [imageio.imread(f) for f in turntable_files]
+
+# loop it twice so the video isn't too short
+imageio.mimwrite(
+    os.path.join(output_dir, "turntable.mp4"),
+    turntable_frames * 2,
+    fps=24
+)
+
+print("Turntable video saved.")
