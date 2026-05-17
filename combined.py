@@ -31,7 +31,7 @@ import logging
 #suppress PyTorch3D bin size warning
 logging.getLogger("pytorch3d").setLevel(logging.ERROR)
 
-#ensure output directory exists and is clean
+#ensure output directory exists and is clean & empty
 output_dir = "outputs_combined"
 if os.path.exists(output_dir):
     for f in os.listdir(output_dir):
@@ -69,6 +69,7 @@ viewpoint_prompts = {
 }
 
 #precompute all text features once before training
+# - turn prompts into CLIP features so we can compute cosine similarity with image features during training
 text_feats = {}
 with torch.no_grad():
     for vp, prompt in viewpoint_prompts.items():
@@ -83,7 +84,8 @@ with torch.no_grad():
     neg_feat = clip_model.encode_text(neg_tokens)
     neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
     print("Encoded negative prompt.")
-    
+
+#warmup prompts: simpler prompts focusing on shape only, to guide initial deformation before colour details are added
 warmup_prompts = {
     (20, 0):   "a 3D render of Iron Man armor, raised chest plate, shoulder pauldrons, bicep plates, front view",
     (20, 90):  "a 3D render of Iron Man armor, arm armor plating, thigh armor, side view",
