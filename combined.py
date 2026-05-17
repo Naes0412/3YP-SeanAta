@@ -66,14 +66,14 @@ base_prompt = "a 3D render of Iron Man armor, red and gold metallic suit, superh
 # - direction suffixes reduce the Janus problem and give CLIP per-view shape+colour signal
 viewpoint_prompts = {
     (20, 0): f"{base_prompt}, front view, red chest plate, gold details",
-    (20, 90): f"{base_prompt}, side view, gold arm guards, red shoulder",  
+    (20, 90): f"{base_prompt}, side view, gold arm, red shoulder",  
     (20, 180):f"{base_prompt}, back view, red and gold back panels",
-    (20, 270): f"{base_prompt}, side view, gold arm guards, red shoulder",
+    (20, 270): f"{base_prompt}, side view, gold arm, red shoulder",
     (60, 45): f"{base_prompt}, overhead view, red helmet, gold face",
-    (-10, 45): f"{base_prompt}, low angle view, gold knee guards, red thighs",
+    (-10, 45): f"{base_prompt}, low angle view, gold knee, red thighs",
     (90, 0): f"{base_prompt}, top down view, red helmet",
-    (20, 45): f"{base_prompt}, front-side diagonal view, red arm plate, gold thigh armour",
-    (20, 315): f"{base_prompt}, front-side diagonal view, red arm plate, gold thigh armour"
+    (20, 45): f"{base_prompt}, diagonal view, red arm, gold thigh",
+    (20, 315): f"{base_prompt}, diagonal view, red arm, gold thigh",
 }
 
 #precompute all text features once before training
@@ -88,7 +88,7 @@ with torch.no_grad():
 
 #negative prompt: push away from plain unarmoured human appearance
 with torch.no_grad():
-    neg_tokens = clip.tokenize(["a plain human body, smooth skin, no armor, no suit"]).to(device)
+    neg_tokens = clip.tokenize(["a plain human body, smooth skin, no armor, black suit, dark clothing"]).to(device)
     neg_feat = clip_model.encode_text(neg_tokens)
     neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
     print("Encoded negative prompt.")
@@ -427,7 +427,7 @@ for step in range(num_steps):
     colour_smooth_loss = colour_smoothness_loss(verts_rgb, faces)
     sat_loss = saturation_loss(verts_rgb)
     
-    sat_weight = 0.05 * (0.5 ** (step / num_steps)) + 0.05  #decay saturation loss weight over time, up to a floor of 0.05, to allow more colour freedom later on
+    sat_weight = 0.05 * (0.5 ** (step / num_steps)) + 0.03  #decay saturation loss weight over time, up to a floor of 0.03, to allow more colour freedom later on
     disp_weight = 0.2 * (0.1 ** (step / num_steps)) #decay displacement regularisation weight
     colour_smooth_weight = 0.3 * (0.3 ** (step / num_steps)) + 0.05  #decay colour smoothness weight, up to a floor of 0.05
 
@@ -438,7 +438,7 @@ for step in range(num_steps):
             + 0.01 * centroid_loss
             + colour_smooth_weight * colour_smooth_loss
             + sat_weight * sat_loss
-            + 0.10 * colour_variance_loss(verts_rgb)
+            + 0.15 * colour_variance_loss(verts_rgb)
             )
 
     loss.backward()
