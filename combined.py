@@ -193,6 +193,7 @@ class DisplacementMLP(nn.Module):
         z = verts[:, 2:3]
         #masks and scaling factors to encourage more/less deformation on the body part
         head_mask = (y > 0.38).float() 
+        face_mask = ((y > 0.38) & (z > 0.05)).float()
         torso_mask     = ((y > -0.1) & (y < 0.45) & (x < 0.18)).float()
         shoulder_mask  = ((y > 0.30) & (y < 0.45) & (x >= 0.12)).float()
         upper_arm_mask = ((y > 0.05) & (y < 0.30) & (x >= 0.18)).float()
@@ -201,25 +202,31 @@ class DisplacementMLP(nn.Module):
         shin_mask      = ((y > -0.38) & (y <= -0.25)).float()
         extremity_mask = ((y < -0.38) | (y > 0.45)).float()
 
-        scale = (0.01 * head_mask
-                + 0.01 * extremity_mask * (1 - head_mask) #hands and feet
-                + 0.18 * shoulder_mask * (1 - head_mask) #pauldrons
-                + 0.12 * upper_arm_mask #bicep/tricep plates
-                + 0.10 * lower_arm_mask #forearm plates
-                + 0.14 * thigh_mask #thigh armour
-                + 0.10 * shin_mask #shin guards
-                + 0.02 * (1 - torso_mask - shoulder_mask - upper_arm_mask
-                            - lower_arm_mask - thigh_mask - shin_mask
-                            - extremity_mask - head_mask).clamp(min=0)
-                + 0.20 * torso_mask * (1 - head_mask))
+        scale = (0.01 * head_mask * (1 - face_mask)
+                 + 0.001 * face_mask #keep face mostly flat for better CLIP recognition, but allow small details
+                 + 0.01 * extremity_mask * (1 - head_mask) #hands and feet
+                 + 0.18 * shoulder_mask * (1 - head_mask) #pauldrons
+                 + 0.12 * upper_arm_mask #bicep/tricep plates
+                 + 0.10 * lower_arm_mask #forearm plates
+                 + 0.14 * thigh_mask #thigh armour
+                 + 0.10 * shin_mask #shin guards
+                 + 0.02 * (1 - torso_mask - shoulder_mask - upper_arm_mask
+                           - lower_arm_mask - thigh_mask - shin_mask
+                           - extremity_mask - head_mask).clamp(min=0)
+                 + 0.20 * torso_mask * (1 - head_mask)
+                )
         
         #front-facing vertices get extra push
         front_boost = (z > 0.0).float() * 0.06  
         scale = scale + front_boost * torso_mask
         
-        #arms get extra push on front half to encourage them to wrap around the body rather than just bulging outwards
+        #arms get extra push on front half to encourage them to wrap around the body
         arm_front_boost = (z > 0.0).float() * 0.04
         scale = scale + arm_front_boost * (upper_arm_mask + lower_arm_mask)
+        
+        #legs get extra push on front half to encourage more pronounced shin guards and thigh armor
+        leg_front_boost = (z > 0.0).float() * 0.03
+        scale = scale + leg_front_boost * (thigh_mask + shin_mask)
 
         return verts + scale * raw * normals
 
@@ -343,10 +350,6 @@ def colour_variance_loss(verts_rgb):
     chroma = verts_rgb.max(dim=-1).values - verts_rgb.min(dim=-1).values
     return torch.relu(0.3 - chroma).mean()
 
-#penalise mean brightness below 0.4 — push colours to be vivid not dark
-def brightness_loss(verts_rgb):
-    return torch.relu(0.4 - verts_rgb.mean(dim=-1)).mean()
-
 # ------------------------------- Optimisation Loop -------------------------------
 
 num_steps = 2000
@@ -424,19 +427,19 @@ for step in range(num_steps):
     colour_smooth_loss = colour_smoothness_loss(verts_rgb, faces)
     sat_loss = saturation_loss(verts_rgb)
     
-    sat_weight = 0.05 * (0.5 ** (step / num_steps)) + 0.03  #decay saturation loss weight over time, up to a floor of 0.03, to allow more colour freedom later on
+    sat_weight = 0.05 * (0.5 ** (step / num_steps)) + 0.05  #decay saturation loss weight over time, up to a floor of 0.05, to allow more colour freedom later on
     disp_weight = 0.2 * (0.1 ** (step / num_steps)) #decay displacement regularisation weight
-    colour_smooth_weight = 0.3 * (0.3 ** (step / num_steps)) + 0.10  #decay colour smoothness weight, up to a floor of 0.10
+    colour_smooth_weight = 0.3 * (0.3 ** (step / num_steps)) + 0.05  #decay colour smoothness weight, up to a floor of 0.05
 
     #Combined loss
     loss = (clip_loss
-            + 0.85 * lap_loss
+            + 0.75 * lap_loss
             + disp_weight * disp_loss
             + 0.01 * centroid_loss
             + colour_smooth_weight * colour_smooth_loss
             + sat_weight * sat_loss
             + 0.10 * colour_variance_loss(verts_rgb)
-            + 0.15 * brightness_loss(verts_rgb))
+            )
 
     loss.backward()
 
