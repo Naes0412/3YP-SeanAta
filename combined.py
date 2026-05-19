@@ -65,9 +65,9 @@ base_prompt = "a 3D render of Iron Man armor, red and gold metallic suit, superh
 #View-dependent prompts inspired by DreamFusion (Poole et al., NeurIPS 2022)
 # - direction suffixes reduce the Janus problem and give CLIP per-view shape+colour signal
 viewpoint_prompts = {
-    (20, 0): f"{base_prompt}, front view, red chest plate, gold details",
+    (20, 0): f"{base_prompt}, front view, bright red chest plate, red torso, gold details",
     (20, 90): f"{base_prompt}, side view, gold arm, red shoulder",  
-    (20, 180):f"{base_prompt}, back view, red and gold back panels",
+    (20, 180):f"{base_prompt}, back view, bright red back, red and gold back panels",
     (20, 270): f"{base_prompt}, side view, gold arm, red shoulder",
     (60, 45): f"{base_prompt}, overhead view, red helmet, gold face",
     (-10, 45): f"{base_prompt}, low angle view, gold knee, red thighs",
@@ -205,11 +205,11 @@ class DisplacementMLP(nn.Module):
         scale = (0.01 * head_mask * (1 - face_mask)
                  + 0.001 * face_mask #keep face mostly flat for better CLIP recognition, but allow small details
                  + 0.01 * extremity_mask * (1 - head_mask) #hands and feet
-                 + 0.18 * shoulder_mask * (1 - head_mask) #pauldrons
+                 + 0.22 * shoulder_mask * (1 - head_mask) #pauldrons
                  + 0.12 * upper_arm_mask #bicep/tricep plates
                  + 0.10 * lower_arm_mask #forearm plates
                  + 0.14 * thigh_mask #thigh armour
-                 + 0.10 * shin_mask #shin guards
+                 + 0.13 * shin_mask #shin guards
                  + 0.02 * (1 - torso_mask - shoulder_mask - upper_arm_mask
                            - lower_arm_mask - thigh_mask - shin_mask
                            - extremity_mask - head_mask).clamp(min=0)
@@ -217,7 +217,7 @@ class DisplacementMLP(nn.Module):
                 )
         
         #front-facing vertices get extra push
-        front_boost = (z > 0.0).float() * 0.06  
+        front_boost = (z > 0.0).float() * 0.08  
         scale = scale + front_boost * torso_mask
         
         #arms get extra push on front half to encourage them to wrap around the body
@@ -426,26 +426,27 @@ for step in range(num_steps):
     #colour regularisation
     colour_smooth_loss = colour_smoothness_loss(verts_rgb, faces)
     sat_loss = saturation_loss(verts_rgb)
+    colour_var_loss = colour_variance_loss(verts_rgb)
     
-    sat_weight = 0.05 * (0.5 ** (step / num_steps)) + 0.03  #decay saturation loss weight over time, up to a floor of 0.03, to allow more colour freedom later on
-    disp_weight = 0.2 * (0.1 ** (step / num_steps)) #decay displacement regularisation weight
-    colour_smooth_weight = 0.3 * (0.3 ** (step / num_steps)) + 0.05  #decay colour smoothness weight, up to a floor of 0.05
+    sat_weight = 0.06 * (0.5 ** (step / num_steps)) + 0.05  #decay saturation loss weight over time, up to a floor of 0.05, to allow more colour freedom later on
+    disp_weight = 0.15 * (0.3 ** (step / num_steps)) #decay displacement regularisation weight
+    colour_smooth_weight = 0.25 * (0.3 ** (step / num_steps)) + 0.08  #decay colour smoothness weight, up to a floor of 0.08
 
     #Combined loss
     loss = (clip_loss
-            + 0.75 * lap_loss
+            + 0.60 * lap_loss
             + disp_weight * disp_loss
             + 0.01 * centroid_loss
             + colour_smooth_weight * colour_smooth_loss
             + sat_weight * sat_loss
-            + 0.15 * colour_variance_loss(verts_rgb)
+            + 0.20 * colour_var_loss
             )
 
     loss.backward()
 
     #gradient clipping: allow larger steps early on for more exploration, then reduce to stabilise fine-tuning
     # - during initial deformation phase, allow larger gradients for DisplacementMLP
-    max_norm = 1.0 if step < 500 else (0.25 if step < 800 else 1.0)
+    max_norm = 1.0 if step < 500 else 0.5
     torch.nn.utils.clip_grad_norm_(displacement_mlp.parameters(), max_norm=max_norm)
     torch.nn.utils.clip_grad_norm_(colour_mlp.parameters(), max_norm=1.0)
 
